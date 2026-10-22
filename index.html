@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VisiTasa</title>
+<!-- Página de inicio de VisiTasa: da a la app su icono (pestaña, escritorio y pantalla de inicio del móvil),
+     la muestra dentro y pide permiso para mandar avisos. La app de verdad está en Google Apps Script. -->
+<link rel="icon" type="image/png" sizes="32x32" href="icono-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icono-192.png">
+<link rel="apple-touch-icon" href="icono-180.png">
+<link rel="manifest" id="manifiesto" href="manifest.webmanifest">
+<meta name="theme-color" content="#202945">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="VisiTasa">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<style>
+  html, body { margin:0; height:100%; background:#F4F5F8; font-family:"Century Gothic","Montserrat",Arial,sans-serif; color:#202945; }
+  iframe { border:0; width:100%; height:100%; display:block; }
+  #barra { position:fixed; left:12px; right:12px; bottom:calc(12px + env(safe-area-inset-bottom)); max-width:560px; margin:0 auto;
+           background:#202945; color:#fff; border-radius:14px; padding:12px 14px; box-shadow:0 6px 24px rgba(0,0,0,.25);
+           display:none; align-items:center; gap:10px; flex-wrap:wrap; font-size:14px; z-index:10; }
+  #barra.visible { display:flex; }
+  #barra p { margin:0; flex:1 1 220px; line-height:1.35; }
+  #barra button { font:inherit; font-size:14px; border-radius:9px; padding:9px 14px; cursor:pointer; border:1px solid #fff; background:none; color:#fff; }
+  #barra button.si { background:#D40E39; border-color:#D40E39; font-weight:600; }
+  .portada { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; text-align:center; padding:24px; box-sizing:border-box; }
+  .portada img { width:96px; height:96px; }
+  .portada h1 { margin:12px 0 6px; font-size:26px; }
+  .portada h1 span { color:#D40E39; }
+</style>
+</head>
+<body>
+<div id="contenido"></div>
+<div id="barra"><p id="barraTexto"></p><div id="barraBotones"></div></div>
+<script>
+// Dirección de la app publicada en Google Apps Script (la que termina en /exec).
+var APP = 'https://script.google.com/macros/s/AKfycbyyTviYXK8w6ycannW6rSxASrYa7P6ocqmJaYO5uUVKKIUoQbhfASR_FTYQAnbwjnUnyg/exec';
+var ORIGEN_APP = /^https:\/\/[a-z0-9-]+\.googleusercontent\.com$/; // marco donde Google ejecuta App.html
+
+function guardado(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
+// El enlace personal (?t=… o ?admin=…) se recuerda: así, al abrir desde el icono, entra directo.
+var busqueda = location.search;
+if (/[?&](t|admin)=/.test(busqueda)) guardado('visitasa-enlace', busqueda.replace(/&(s|r)=[^&]*/g, ''));
+else busqueda = guardado('visitasa-enlace') || '';
+
+if (busqueda) {
+  var marco = document.createElement('iframe');
+  marco.src = APP + busqueda;
+  marco.title = 'VisiTasa';
+  marco.allow = 'clipboard-write';
+  document.getElementById('contenido').style.height = '100%';
+  document.getElementById('contenido').appendChild(marco);
+  // Manifiesto con la dirección personal, para que el icono anclado abra directamente tu agenda.
+  var base = location.href.split('?')[0];
+  var icono = function (n, t, p) { return { src: base + n, sizes: t, type: 'image/png', purpose: p || 'any' }; };
+  var manifiesto = {
+    name: 'VisiTasa · Tecnitasa Madrid', short_name: 'VisiTasa', lang: 'es', display: 'standalone',
+    start_url: base + busqueda.replace(/&(s|r)=[^&]*/g, ''), scope: base, id: base,
+    background_color: '#F4F5F8', theme_color: '#202945',
+    icons: [icono('icono-192.png', '192x192'), icono('icono-512.png', '512x512'), icono('icono-maskable-512.png', '512x512', 'maskable')]
+  };
+  document.getElementById('manifiesto').href = 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(manifiesto));
+} else {
+  document.getElementById('contenido').innerHTML = '<div class="portada"><img src="icono-192.png" alt=""><h1>Visi<span>Tasa</span></h1>' +
+    '<p>Agenda de visitas · Delegación de Madrid de Tecnitasa</p><p>Abre el enlace personal que te ha mandado la delegación.</p></div>';
+}
+
+/* ---------- Avisos al móvil ---------- */
+var quien = null; // { modo, clave } que manda la app cuando ha cargado
+var registro = null;
+var esIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+var instalada = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+var avisosPosibles = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then(function (r) { registro = r; comprobarAvisos(); }).catch(function () {});
+}
+
+window.addEventListener('message', function (ev) {
+  if (!ORIGEN_APP.test(ev.origin) || !ev.data || ev.data.visitasa !== 'lista') return;
+  quien = { modo: ev.data.modo === 'admin' ? 'admin' : 'tasador', clave: String(ev.data.clave || '') };
+  comprobarAvisos();
+});
+
+function barra(texto, botones) {
+  document.getElementById('barraTexto').innerHTML = texto;
+  var cont = document.getElementById('barraBotones');
+  cont.innerHTML = '';
+  botones.forEach(function (b) {
+    var el = document.createElement('button');
+    el.textContent = b[0]; if (b[2]) el.className = 'si';
+    el.onclick = b[1];
+    cont.appendChild(el);
+  });
+  document.getElementById('barra').classList.toggle('visible', botones.length > 0);
+}
+function cerrarBarra(dias) {
+  if (dias) guardado('visitasa-no-avisos', String(Date.now() + dias * 864e5));
+  barra('', []);
+}
+
+function comprobarAvisos() {
+  if (!quien || !registro) return;
+  var pospuesto = Number(guardado('visitasa-no-avisos') || 0) > Date.now();
+  if (!avisosPosibles) {
+    // En iPhone los avisos solo funcionan con VisiTasa añadida a la pantalla de inicio.
+    if (esIOS && !instalada && !pospuesto) {
+      barra('<b>¿Quieres avisos en el iPhone?</b> Pulsa <b>Compartir</b> (el cuadrado con la flecha) → <b>Añadir a pantalla de inicio</b>, y abre VisiTasa desde ese icono.',
+        [['Entendido', function () { cerrarBarra(7); }, true]]);
+    }
+    return;
+  }
+  if (Notification.permission === 'granted') { suscribir(); return; }
+  if (Notification.permission === 'default' && !pospuesto) {
+    barra('<b>🔔 ¿Te avisamos aquí cuando haya novedades?</b> ' +
+      (quien.modo === 'admin' ? 'Por ejemplo, cuando un tasador acepte o rechace una visita.' : 'Por ejemplo, cuando te propongamos una visita.'),
+      [['Activar avisos', pedirPermiso, true], ['Ahora no', function () { cerrarBarra(3); }]]);
+  }
+}
+
+function pedirPermiso() {
+  Notification.requestPermission().then(function (p) {
+    if (p === 'granted') { suscribir(true); }
+    else { cerrarBarra(30); }
+  });
+}
+
+function base64aBytes(b64) {
+  var s = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((b64.length + 3) % 4));
+  var out = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+function suscribir(avisar) {
+  if (!quien) return;
+  fetch(APP + '?clavepublica=1').then(function (r) { return r.json(); }).then(function (res) {
+    var clave = base64aBytes(res.k);
+    return registro.pushManager.getSubscription().then(function (sub) {
+      // Si la suscripción es de otra clave, se rehace.
+      if (sub && sub.options && sub.options.applicationServerKey) {
+        var vieja = new Uint8Array(sub.options.applicationServerKey);
+        if (vieja.length !== clave.length || vieja.some(function (b, i) { return b !== clave[i]; })) {
+          return sub.unsubscribe().then(function () { return null; });
+        }
+      }
+      return sub;
+    }).then(function (sub) {
+      return sub || registro.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: clave });
+    });
+  }).then(function (sub) {
+    return fetch(APP + '?suscribir=' + encodeURIComponent(quien.clave) + '&modo=' + quien.modo + '&ep=' + encodeURIComponent(sub.endpoint))
+      .then(function (r) { return r.json(); });
+  }).then(function () {
+    if (avisar) {
+      barra('<b>✓ Avisos activados.</b> Te avisaremos en este dispositivo cuando haya novedades.', [['Vale', function () { cerrarBarra(); }, true]]);
+      setTimeout(function () { cerrarBarra(); }, 6000);
+    }
+  }).catch(function (e) {
+    if (avisar) barra('No se han podido activar los avisos: ' + (e && e.message ? e.message : e), [['Cerrar', function () { cerrarBarra(); }]]);
+  });
+}
+</script>
+</body>
+</html>
